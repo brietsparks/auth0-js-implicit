@@ -1,4 +1,4 @@
-import { Authenticator, extractAuthData, extractExpirationData } from './authenticator';
+import { Authenticator, extractAuthData, extractExpirationData, responseType } from './authenticator';
 import { makeClient } from './test-utils/client';
 import MemStorage from './test-utils/mem-storage';
 import { WebAuth } from 'auth0-js';
@@ -24,17 +24,17 @@ describe('authenticator', () => {
       auth.promptLogin('/page');
 
       expect(authStorage.retrieveLoginLocation()).toEqual('/page');
-      expect(client.authorize).toBeCalledWith({ responseType: 'token id_token' });
+      expect(client.authorize).toBeCalledWith({ responseType });
 
       auth.promptLogin('/page-1', { prompt: 'none' });
       expect(authStorage.retrieveLoginLocation()).toEqual('/page-1');
-      expect(client.authorize).toBeCalledWith({ responseType: 'token id_token', prompt: 'none' });
+      expect(client.authorize).toBeCalledWith({ responseType, prompt: 'none' });
     });
 
     describe('handleLoginSuccess', () => {
       test('with response data', () => {
         client.parseHash = jest.fn().mockImplementation(cb => cb(undefined, {
-          accessToken: 'a',
+          accessToken: 't',
           idTokenPayload: { sub: 'u' },
           expiresIn: 7200
         }));
@@ -42,7 +42,7 @@ describe('authenticator', () => {
         const expectedExpiresAt = Date.now() + (7200 * 1000);
 
         auth.handleLoginSuccess().then(({ accessToken, userId, expiresAt }) => {
-          expect(accessToken).toEqual('a');
+          expect(accessToken).toEqual('t');
           expect(userId).toEqual('u');
           expect(Math.trunc(expiresAt / 1000)).toEqual(Math.trunc(expectedExpiresAt / 1000));
         });
@@ -69,13 +69,85 @@ describe('authenticator', () => {
       });
     });
 
+    describe('authenticate', () => {
+      test('no access token, auth required', () => {
+        client.authorize = jest.fn();
+        auth.authenticate('/page');
 
+        expect(authStorage.retrieveLoginLocation()).toEqual('/page');
+        expect(client.authorize).toBeCalledWith({ responseType })
+      });
+
+      test('no access token, auth not required', () => {
+        client.authorize = jest.fn();
+        auth.authenticate();
+
+        expect(authStorage.retrieveLoginLocation()).toEqual(undefined);
+        expect(client.authorize).not.toHaveBeenCalled();
+      });
+
+      test('auth required, access token expired', () => {
+        authStorage.storeAccessToken('t');
+        authStorage.storeExpiresAt('0');
+
+        client.authorize = jest.fn();
+
+        auth.authenticate('/page');
+
+        expect(authStorage.retrieveLoginLocation()).toEqual('/page');
+        expect(authStorage.retrieveAccessToken()).toEqual(undefined);
+        expect(authStorage.retrieveExpiresAt()).toEqual(undefined);
+        expect(client.authorize).toBeCalledWith({ responseType })
+      });
+
+      test('access token fresh but expiring soon', () => {
+        authStorage.storeAccessToken('t');
+        authStorage.storeExpiresAt((Date.now() + 2000).toString());
+
+        client.checkSession = jest.fn().mockImplementation((opts, cb) => cb(undefined, {
+          accessToken: 't1',
+          idTokenPayload: { sub: 'u' },
+          expiresIn: 7200
+        }));
+        jest.spyOn(auth, 'authenticate');
+        jest.useFakeTimers();
+
+        auth.authenticate();
+        jest.runOnlyPendingTimers();
+
+        expect(auth.authenticate).toHaveBeenCalledTimes(2);
+      });
+
+      test('access token fresh and not expiring soon', () => {
+        authStorage.storeAccessToken('t');
+        authStorage.storeExpiresAt((Date.now() + 10000 * 1000).toString());
+
+        client.authorize = jest.fn();
+        jest.spyOn(auth, 'authenticate');
+        jest.useFakeTimers();
+
+        auth.authenticate();
+        jest.runOnlyPendingTimers();
+
+        expect(auth.authenticate).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    test('logout', () => {
+      authStorage.storeAccessToken('t');
+      client.logout = jest.fn();
+
+      auth.logout();
+
+      expect(authStorage.retrieveAccessToken()).toEqual(undefined);
+      expect(client.logout).toBeCalledWith({ returnTo: '/logout' });
+    });
   });
 
   describe('extractAuthData', () => {
     test('with valid data', () => {
       const parsed = {
-        accessToken: 'a',
+        accessToken: 't',
         idTokenPayload: { sub: 'u' },
         expiresIn: 7200
       };
@@ -87,11 +159,14 @@ describe('authenticator', () => {
       actual = extractAuthData(parsed);
 
       expected = {
-        accessToken: 'a',
+        accessToken: 't',
         userId: 'u',
         expiresAt: expectedExpiresAt
       };
       expect(actual).toEqual(expected);
+    });
+
+    describe('with invalid data', () => {
     });
   });
 

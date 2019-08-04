@@ -56,7 +56,7 @@ export class Authenticator {
             const { accessToken, userId, expiresAt } = extractAuthData(parsed);
 
             this.authStorage.removeLoginLocation();
-            this.authStorage.storeToken(accessToken);
+            this.authStorage.storeAccessToken(accessToken);
             this.authStorage.storeExpiresAt(expiresAt.toString());
 
             resolve({ accessToken, userId, expiresAt });
@@ -90,19 +90,19 @@ export class Authenticator {
 
     const expiresAt = authStorage.retrieveExpiresAt();
 
-    const [isValid, isExpiringSoon] = extractExpirationData(expiresAt, options.threshold);
+    const [isFresh, isExpiringSoon] = extractExpirationData(expiresAt, options.threshold);
 
-    if (!isValid && currentLocation) {
+    if (!isFresh && currentLocation) {
       authStorage.storeLoginLocation(currentLocation);
-      authStorage.removeToken();
+      authStorage.removeAccessToken();
       authStorage.removeExpiresAt();
       client.authorize({ responseType });
       return;
     }
 
-    if (isValid && isExpiringSoon) {
+    if (isFresh && isExpiringSoon) {
       return this.reauthenticate().then(({ accessToken, expiresAt }) => {
-        authStorage.storeToken(accessToken);
+        authStorage.storeAccessToken(accessToken);
         authStorage.storeExpiresAt(expiresAt.toString());
         this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), options.interval);
       });
@@ -112,7 +112,7 @@ export class Authenticator {
   }
 
   logout() {
-    this.authStorage.removeToken();
+    this.authStorage.removeAccessToken();
     this.client.logout({
       returnTo: this.logoutRedirectUrl
       // clientID needed?
