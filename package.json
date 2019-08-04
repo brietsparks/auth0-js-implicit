@@ -1,0 +1,30 @@
+{
+  "name": "auth0-js-implicit",
+  "version": "0.0.0",
+  "description": "",
+  "files": [
+    "/dist/"
+  ],
+  "main": "dist/index.js",
+  "typings": "dist/index.d.ts",
+  "scripts": {
+    "test": "jest --watchAll",
+    "build": "tsc",
+    "coverage": "jest --coverage"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/auth0-js": "^9.10.5",
+    "@types/jest": "^24.0.16",
+    "@types/node": "^12.6.9",
+    "auth0-js": "^9.11.2",
+    "dotenv": "^8.0.0",
+    "jest": "^24.8.0",
+    "ts-jest": "^24.0.2",
+    "typescript": "^3.5.3"
+  },
+  "peerDependencies": {
+    "auth0-js": "^9.11.2"
+  }
+}
