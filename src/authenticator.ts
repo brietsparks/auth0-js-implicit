@@ -17,7 +17,8 @@ export interface AuthResponse {
 export interface AuthData {
   userId: string,
   accessToken: string,
-  expiresAt: number
+  expiresAt: number,
+  redirectTo?: string|null
 }
 
 export const DEFAULT_THRESHOLD = 1200;
@@ -43,6 +44,10 @@ export class Authenticator {
     });
   }
 
+  getAuthStorage() {
+    return this.authStorage;
+  }
+
   promptLogin(currentLocation: string, opts: AuthorizeOptions = {}) {
     this.authStorage.storeLoginLocation(currentLocation);
     this.client.authorize({ ...opts, responseType });
@@ -55,11 +60,12 @@ export class Authenticator {
           try {
             const { accessToken, userId, expiresAt } = extractAuthData(parsed);
 
+            const redirectTo = this.authStorage.retrieveLoginLocation();
             this.authStorage.removeLoginLocation();
             this.authStorage.storeAccessToken(accessToken);
             this.authStorage.storeExpiresAt(expiresAt.toString());
 
-            resolve({ accessToken, userId, expiresAt });
+            resolve({ accessToken, userId, expiresAt, redirectTo });
           } catch (error) {
             reject(error)
           }
@@ -100,23 +106,22 @@ export class Authenticator {
       return;
     }
 
+    const interval = options.interval || DEFAULT_INTERVAL;
+
     if (isFresh && isExpiringSoon) {
       return this.reauthenticate().then(({ accessToken, expiresAt }) => {
         authStorage.storeAccessToken(accessToken);
         authStorage.storeExpiresAt(expiresAt.toString());
-        this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), options.interval);
+        this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), interval);
       });
     }
 
-    this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), options.interval);
+    this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), interval);
   }
 
   logout() {
     this.authStorage.removeAccessToken();
-    this.client.logout({
-      returnTo: this.logoutRedirectUrl
-      // clientID needed?
-    })
+    this.client.logout({ returnTo: this.logoutRedirectUrl })
   }
 
   private reauthenticate() {
@@ -145,7 +150,7 @@ export function extractAuthData(parsed: AuthResponse) {
     throw new Error(`expected accessToken to be a string, got ${accessToken}`);
   }
 
-  if (!expiresIn || !Number.isInteger(expiresIn) || !(expiresIn > -1)) {
+  if (!expiresIn || typeof expiresIn !== 'number' || !(expiresIn > -1)) {
     throw new Error(`expected expiresIn to be a positive integer, got ${expiresIn}`);
   }
 

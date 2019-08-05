@@ -37,7 +37,7 @@ export interface Keys {
 export const defaultKeys = {
   LOGIN_LOCATION: 'login_location',
   ACCESS_TOKEN: 'access_token',
-  EXPIRES_AT: 'user_id',
+  EXPIRES_AT: 'expires_at',
   NONCE: 'auth_nonce',
   STATE: 'auth_state',
 };

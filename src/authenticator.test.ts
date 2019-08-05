@@ -167,6 +167,51 @@ describe('authenticator', () => {
     });
 
     describe('with invalid data', () => {
+      const authResponse = {
+        idTokenPayload: { sub: 'u' },
+        accessToken: 't',
+        expiresIn: 7200,
+      };
+
+      test('invalid idTokenPayload', () => {
+        // @ts-ignore
+        const actual = () => extractAuthData({...authResponse, idTokenPayload: 5 });
+        const error = new Error('expected idTokenPayload to be an object, got 5');
+        expect(actual).toThrow(error);
+      });
+
+      test('invalid accessToken', () => {
+        // @ts-ignore
+        const actual = () => extractAuthData({...authResponse, accessToken: 5 });
+        const error = new Error('expected accessToken to be a string, got 5');
+        expect(actual).toThrow(error);
+      });
+
+      test('undefined expiresIn', () => {
+        // @ts-ignore
+        const actual = () => extractAuthData({...authResponse, expiresIn: undefined });
+        const error = new Error('expected expiresIn to be a positive integer, got undefined');
+        expect(actual).toThrow(error);
+      });
+
+      test('non-integer expiresIn', () => {
+        // @ts-ignore
+        const actual = () => extractAuthData({...authResponse, expiresIn: 's' });
+        const error = new Error('expected expiresIn to be a positive integer, got s');
+        expect(actual).toThrow(error);
+      });
+
+      test('negative expiresIn', () => {
+        const actual = () => extractAuthData({...authResponse, expiresIn: -5 });
+        const error = new Error('expected expiresIn to be a positive integer, got -5');
+        expect(actual).toThrow(error);
+      });
+
+      test('sub', () => {
+        const actual = () => extractAuthData({...authResponse, idTokenPayload: {} });
+        const error = new Error('idTokenPayload.sub not found in parsed hash');
+        expect(actual).toThrow(error);
+      });
     });
   });
 
