@@ -1,21 +1,40 @@
-import { Authenticator, extractAuthData, extractExpirationData, responseType } from './authenticator';
+import { AuthorizeOptions, WebAuth } from 'auth0-js';
+
+import {
+  Authenticator, extractAuthData, extractExpirationData, DEFAULT_LEEWAY,
+  responseType, ReauthenticationSuccessHandler, ReauthenticationFailureHandler
+} from './authenticator';
 import { makeClient } from './test-utils/client';
 import MemStorage from './test-utils/mem-storage';
-import { WebAuth } from 'auth0-js';
 import { AuthStorage, Storage } from './storage';
 
+const tsToSeconds = (n: number) => Math.trunc(n / 1000);
+
 describe('authenticator', () => {
+  const mockExpiresInSeconds = 7200;
+  const mockExpiresInMs = mockExpiresInSeconds * 1000;
+  const leewaySeconds = DEFAULT_LEEWAY;
+  const leewayMs = leewaySeconds * 1000;
+
   describe('Authenticator', () => {
     let client: WebAuth,
       storage: Storage,
       auth: Authenticator,
-      authStorage: AuthStorage
+      authStorage: AuthStorage,
+      onReauthenticationSuccess: jest.MockedFunction<ReauthenticationSuccessHandler>,
+      onReauthenticationFailure: jest.MockedFunction<ReauthenticationFailureHandler>
     ;
 
     beforeEach(() => {
       client = makeClient();
       storage = new MemStorage();
-      auth = new Authenticator(client, '/logout', { storage });
+      onReauthenticationSuccess = jest.fn();
+      onReauthenticationFailure = jest.fn();
+      auth = new Authenticator(client, '/logout', {
+        storage,
+        onReauthenticationSuccess,
+        onReauthenticationFailure
+      });
       authStorage = auth.authStorage;
     });
 
@@ -32,104 +51,163 @@ describe('authenticator', () => {
     });
 
     describe('handleLoginSuccess', () => {
-      test('with response data', () => {
+      test('with response data', async () => {
         client.parseHash = jest.fn().mockImplementation(cb => cb(undefined, {
           accessToken: 't',
           idTokenPayload: { sub: 'u' },
-          expiresIn: 7200
+          expiresIn: mockExpiresInSeconds
         }));
 
-        const expectedExpiresAt = Date.now() + (7200 * 1000);
+        const expectedExpiresAt = Date.now() + mockExpiresInMs;
 
-        auth.handleLoginSuccess().then(({ accessToken, userId, expiresAt }) => {
-          expect(accessToken).toEqual('t');
-          expect(userId).toEqual('u');
-          expect(Math.trunc(expiresAt / 1000)).toEqual(Math.trunc(expectedExpiresAt / 1000));
-        });
+        const { accessToken, userId, expiresAt } = await auth.handleLoginSuccess();
+
+        expect(accessToken).toEqual('t');
+        expect(userId).toEqual('u');
+        expect(tsToSeconds(expiresAt as number)).toEqual(tsToSeconds(expectedExpiresAt));
+
+        expect(authStorage.retrieveAccessToken()).toEqual('t');
+        expect(authStorage.retrieveUserId()).toEqual('u');
+        expect(tsToSeconds(authStorage.retrieveExpiresAt() as number)).toEqual(tsToSeconds(expectedExpiresAt));
       });
 
-      test('with error', () => {
+      test('with error', async () => {
         client.parseHash = jest.fn().mockImplementation(cb => cb(new Error('error!'), undefined));
 
-        auth.handleLoginSuccess()
-          .then(() => {})
-          .catch(error => {
-            expect(error.message).toEqual('error!');
-          });
+        try {
+          await auth.handleLoginSuccess();
+        } catch (error) {
+          expect(error.message).toEqual('error!');
+          expect(authStorage.retrieveAccessToken()).toEqual(undefined);
+          expect(authStorage.retrieveUserId()).toEqual(undefined);
+          expect(authStorage.retrieveExpiresAt()).toEqual(undefined);
+        }
       });
 
-      test('with neither response nor error', () => {
+      test('with neither response nor error', async () => {
         client.parseHash = jest.fn().mockImplementation(cb => cb(undefined, undefined));
 
-        auth.handleLoginSuccess()
-          .then(() => {})
-          .catch(error => {
-            expect(error.message).toEqual('parseHash neither parsed the hash successfully nor returned an error');
-          });
+        try {
+          await auth.handleLoginSuccess()
+        } catch (error) {
+          expect(error.message).toEqual('parseHash neither parsed the hash successfully nor returned an error');
+        }
       });
     });
 
     describe('authenticate', () => {
-      test('no access token, auth required', () => {
+      test('no access token, auth required', async () => {
         client.authorize = jest.fn();
-        auth.authenticate('/page');
+
+        const result = await auth.authenticate('/page');
 
         expect(authStorage.retrieveLoginLocation()).toEqual('/page');
-        expect(client.authorize).toBeCalledWith({ responseType })
+
+        expect(result).toEqual({});
+
+        // @ts-ignore
+        const authorizeArgs = client.authorize.mock.calls[0][0];
+        expect(authorizeArgs.responseType).toEqual(responseType);
       });
 
-      test('no access token, auth not required', () => {
+      test('no access token, auth not required', async () => {
         client.authorize = jest.fn();
-        auth.authenticate();
+
+        const result = await auth.authenticate();
 
         expect(authStorage.retrieveLoginLocation()).toEqual(undefined);
+
         expect(client.authorize).not.toHaveBeenCalled();
+        expect(result).toEqual({});
       });
 
-      test('auth required, access token expired', () => {
+      test('auth required, access token expired', async () => {
         authStorage.storeAccessToken('t');
-        authStorage.storeExpiresAt('0');
+        authStorage.storeExpiresAt(0);
 
         client.authorize = jest.fn();
 
-        auth.authenticate('/page');
+        await auth.authenticate('/page');
 
         expect(authStorage.retrieveLoginLocation()).toEqual('/page');
         expect(authStorage.retrieveAccessToken()).toEqual(undefined);
         expect(authStorage.retrieveExpiresAt()).toEqual(undefined);
-        expect(client.authorize).toBeCalledWith({ responseType })
+
+        // @ts-ignore
+        const authorizeArgs = client.authorize.mock.calls[0][0];
+        expect(authorizeArgs.responseType).toEqual(responseType);
       });
 
-      test('access token fresh but expiring soon', () => {
+      test('access token fresh and not expiring soon', async () => {
+        const expectedExpiresAt = (Date.now() + 10000 * 1000);
+        authStorage.storeExpiresAt(expectedExpiresAt);
+        authStorage.storeUserId('u');
         authStorage.storeAccessToken('t');
-        authStorage.storeExpiresAt((Date.now() + 2000).toString());
-
-        client.checkSession = jest.fn().mockImplementation((opts, cb) => cb(undefined, {
-          accessToken: 't1',
-          idTokenPayload: { sub: 'u' },
-          expiresIn: 7200
-        }));
-        jest.spyOn(auth, 'authenticate');
-        jest.useFakeTimers();
-
-        auth.authenticate();
-        jest.runOnlyPendingTimers();
-
-        expect(auth.authenticate).toHaveBeenCalledTimes(2);
-      });
-
-      test('access token fresh and not expiring soon', () => {
-        authStorage.storeAccessToken('t');
-        authStorage.storeExpiresAt((Date.now() + 10000 * 1000).toString());
 
         client.authorize = jest.fn();
-        jest.spyOn(auth, 'authenticate');
-        jest.useFakeTimers();
 
-        auth.authenticate();
-        jest.runOnlyPendingTimers();
+        const { userId, accessToken, expiresAt } = await auth.authenticate();
 
-        expect(auth.authenticate).toHaveBeenCalledTimes(2);
+        expect(userId).toEqual('u');
+        expect(accessToken).toEqual('t');
+        expect(expiresAt).toEqual(expectedExpiresAt);
+      });
+
+      describe('silent reauthentication', () => {
+        test('access token fresh but within reauthentication threshold', async () => {
+          // token 't' expires in 2 seconds
+          authStorage.storeAccessToken('t');
+          authStorage.storeExpiresAt((Date.now() + 2000));
+
+          client.checkSession = jest.fn().mockImplementation((opts, cb) => cb(undefined, {
+            accessToken: 't1',
+            idTokenPayload: { sub: 'u' },
+            expiresIn: mockExpiresInSeconds
+          }));
+          jest.spyOn(auth, 'authenticate');
+          jest.useFakeTimers();
+
+          const expectedExpiresAt = Date.now() + mockExpiresInMs;
+
+          await auth.authenticate();
+
+          // the new auth result was stored
+          expect(authStorage.retrieveAccessToken()).toEqual('t1');
+          expect(tsToSeconds((authStorage.retrieveExpiresAt() as number))).toEqual(tsToSeconds(expectedExpiresAt));
+
+          // the new auth result was passed to the reauthentication handler
+          const { userId, accessToken, expiresAt } = onReauthenticationSuccess.mock.calls[0][0];
+          expect(userId).toEqual('u');
+          expect(accessToken).toEqual('t1');
+          expect(tsToSeconds(expiresAt as number)).toEqual(tsToSeconds(expectedExpiresAt));
+
+
+          // authenticate is called again at the next reauthentication threshold
+          jest.advanceTimersByTime(mockExpiresInMs - leewayMs - 1000);
+          expect(auth.authenticate).toHaveBeenCalledTimes(1);
+          jest.advanceTimersByTime(2000);
+          expect(auth.authenticate).toHaveBeenCalledTimes(2);
+        });
+
+        test('access token fresh and not within reauthentication threshold', async () => {
+          const expectedExpiresAt = Date.now() + mockExpiresInMs;
+          authStorage.storeAccessToken('t');
+          authStorage.storeExpiresAt(expectedExpiresAt);
+
+          client.authorize = jest.fn();
+          jest.spyOn(auth, 'authenticate');
+          jest.useFakeTimers();
+
+          const thresholdTimeout = expectedExpiresAt - leewayMs - Date.now();
+
+          await auth.authenticate();
+
+          jest.advanceTimersByTime(thresholdTimeout - 1000);
+          expect(auth.authenticate).toHaveBeenCalledTimes(1);
+
+          jest.advanceTimersByTime(2000);
+          expect(auth.authenticate).toHaveBeenCalledTimes(2);
+        });
       });
     });
 
@@ -149,7 +227,7 @@ describe('authenticator', () => {
       const parsed = {
         accessToken: 't',
         idTokenPayload: { sub: 'u' },
-        expiresIn: 7200
+        expiresIn: mockExpiresInSeconds
       };
 
       const expectedExpiresAt = Date.now() + (parsed.expiresIn * 1000);
@@ -170,7 +248,7 @@ describe('authenticator', () => {
       const authResponse = {
         idTokenPayload: { sub: 'u' },
         accessToken: 't',
-        expiresIn: 7200,
+        expiresIn: mockExpiresInSeconds,
       };
 
       test('invalid idTokenPayload', () => {
@@ -217,29 +295,29 @@ describe('authenticator', () => {
 
   describe('extractExpirationData', () => {
     describe('valid data', () => {
-      test('null expiresAt', () => {
-        const actual = extractExpirationData(null, 7200);
+      test('undefined expiresAt', () => {
+        const actual = extractExpirationData(undefined, mockExpiresInSeconds);
         const expected = [false];
         expect(actual).toEqual(expected);
       });
 
       test('expiresAt is in the past', () => {
-        const expiresAt = (Date.now() - 10000).toString();
-        const actual = extractExpirationData(expiresAt, 7200);
+        const expiresAt = (Date.now() - 10000);
+        const actual = extractExpirationData(expiresAt, mockExpiresInSeconds);
         const expected = [false];
         expect(actual).toEqual(expected);
       });
 
-      test('not expired, expiring within threshold', () => {
-        const expiresAt = (Date.now() + 5000).toString();
-        const actual = extractExpirationData(expiresAt, 7200);
+      test('not expired, expiring within leeway', () => {
+        const expiresAt = (Date.now() + 5000);
+        const actual = extractExpirationData(expiresAt, mockExpiresInSeconds);
         const expected = [true, true];
         expect(actual).toEqual(expected);
       });
 
-      test('not expired, not expiring within threshold', () => {
-        const expiresAt = (Date.now() + 9000).toString();
-        const actual = extractExpirationData(expiresAt, 7200);
+      test('not expired, not expiring within leeway', () => {
+        const expiresAt = (Date.now() + 9000);
+        const actual = extractExpirationData(expiresAt, mockExpiresInSeconds);
         const expected = [true, false];
         expect(actual).toEqual(expected);
       });
@@ -249,17 +327,17 @@ describe('authenticator', () => {
       test('invalid expiresAt', () => {
         [{}, [], 's', function() {}].forEach(invalidExpiresAt => {
           // @ts-ignore
-          const actual = extractExpirationData(invalidExpiresAt, 7200);
+          const actual = extractExpirationData(invalidExpiresAt, mockExpiresInSeconds);
           const expected = [false];
           expect(actual).toEqual(expected);
         })
       });
 
-      test('invalid threshold', () => {
-        [{}, [], 's', function() {}].forEach(invalidThreshold => {
+      test('invalid leeway', () => {
+        [{}, [], 's', function() {}].forEach(invalidLeeway => {
           const expiresAt = (Date.now() + 5000).toString();
           // @ts-ignore
-          const actual = extractExpirationData(expiresAt, invalidThreshold);
+          const actual = extractExpirationData(expiresAt, invalidLeeway);
           const expected = [true, true];
           expect(actual).toEqual(expected);
         })
