@@ -1,24 +1,24 @@
-import { AuthStorage, Keys as StorageKeys, makeAuthStorage, Storage } from './storage';
 import { AuthorizeOptions, WebAuth } from 'auth0-js';
 
+import { AuthStorage, Keys as StorageKeys, makeAuthStorage, Storage } from './storage';
+import { noop, randomString } from './util';
+
 export interface Options {
-  threshold?: number,
-  interval?: number,
   storage?: Storage,
   storageKeys?: StorageKeys,
+  reauthenticationLeeway?: number,
+  onReauthenticationSuccess?: ReauthenticationSuccessHandler,
+  onReauthenticationFailure?: ReauthenticationFailureHandler,
 }
+
+export type ReauthenticationSuccessHandler = (result: AuthResult) => void;
+export type ReauthenticationFailureHandler = (error: Error) => void;
 
 export interface AuthResponse {
   accessToken?: string;
   idTokenPayload?: any;
   expiresIn?: number;
 }
-
-// interface AuthData {
-//   userId: string,
-//   accessToken: string,
-//   expiresAt: number,
-// }
 
 export interface AuthResult {
   userId?: string,
@@ -27,7 +27,7 @@ export interface AuthResult {
   redirectTo?: string,
 }
 
-export const DEFAULT_THRESHOLD = 1200;
+export const DEFAULT_LEEWAY = 1200;
 
 export const responseType = 'token id_token';
 
@@ -47,6 +47,14 @@ export class Authenticator {
       storage: options.storage,
       keys: options.storageKeys
     });
+  }
+
+  getUserId() {
+    return this.authStorage.retrieveUserId();
+  }
+
+  getAccessToken() {
+    return this.authStorage.retrieveAccessToken();
   }
 
   getAuthStorage() {
@@ -71,6 +79,8 @@ export class Authenticator {
             this.authStorage.storeAccessToken(accessToken);
             this.authStorage.storeExpiresAt(expiresAt);
 
+            this.setReauthenticationTimeout(expiresAt);
+
             resolve({ accessToken, userId, expiresAt, redirectTo });
           } catch (error) {
             reject(error)
@@ -87,7 +97,7 @@ export class Authenticator {
   authenticate(currentLocation?: string) {
     const authStorage = this.authStorage;
     const client = this.client;
-    const options = this.options;
+    const state = randomString();
 
     return new Promise<AuthResult>(resolve => {
       const accessToken = authStorage.retrieveAccessToken();
@@ -95,7 +105,7 @@ export class Authenticator {
       if (!accessToken) {
         if (currentLocation) {
           authStorage.storeLoginLocation(currentLocation);
-          client.authorize({ responseType });
+          client.authorize({ responseType, state });
         }
 
         resolve({});
@@ -103,53 +113,93 @@ export class Authenticator {
 
       let expiresAt = authStorage.retrieveExpiresAt();
 
-      const [isFresh, isExpiringSoon] = extractExpirationData(expiresAt, options.threshold);
+      const [isFresh, isExpiringSoon] = extractExpirationData(expiresAt, this.getReauthenticationLeeway());
 
       if (!isFresh && currentLocation) {
         authStorage.storeLoginLocation(currentLocation);
         authStorage.removeAccessToken();
         authStorage.removeExpiresAt();
-        client.authorize({ responseType });
+        client.authorize({ responseType, state });
         resolve({});
       }
 
       if (isFresh && isExpiringSoon) {
-        return this.reauthenticate().then(({ accessToken, expiresAt }) => {
-          if (accessToken && expiresAt) {
-            authStorage.storeAccessToken(accessToken);
-            authStorage.storeExpiresAt(expiresAt);
-            this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), expiresAt - Date.now());
-            resolve({ accessToken, expiresAt });
-          } else {
+        return this.reauthenticate()
+          .then(({ userId, accessToken, expiresAt }) => {
+            if (accessToken && expiresAt) {
+              authStorage.storeAccessToken(accessToken);
+              authStorage.storeExpiresAt(expiresAt);
+
+              this.setReauthenticationTimeout(expiresAt);
+              this.handleReauthenticationSuccess({ userId, accessToken, expiresAt });
+
+              resolve({ accessToken, expiresAt });
+            }
+          })
+          .catch(error => {
+            authStorage.removeUserId();
             authStorage.removeAccessToken();
             authStorage.removeExpiresAt();
-          }
-        });
+
+            this.handleReauthenticationFailure(error);
+
+            resolve({});
+          })
       }
 
-      this.reauthTimeoutId = window.setTimeout(() => this.authenticate(), (expiresAt as number) - Date.now());
-      const userId = authStorage.retrieveUserId();
+      this.setReauthenticationTimeout(expiresAt as number);
 
-      resolve({ userId, accessToken, expiresAt });
+      resolve({
+        userId: authStorage.retrieveUserId(),
+        accessToken,
+        expiresAt
+      });
     });
   }
 
   logout() {
+    this.authStorage.removeUserId();
     this.authStorage.removeAccessToken();
     this.authStorage.removeExpiresAt();
-    this.client.logout({ returnTo: this.logoutRedirectUrl })
+    this.client.logout({ returnTo: this.logoutRedirectUrl });
+  }
+
+  private getReauthenticationLeeway() {
+    const seconds = this.options.reauthenticationLeeway || DEFAULT_LEEWAY;
+    return seconds * 1000;
+  }
+
+  private setReauthenticationTimeout(expiresAt: number) {
+    window.clearTimeout(this.reauthTimeoutId);
+    const timeout = (expiresAt - this.getReauthenticationLeeway()) - Date.now();
+    this.reauthTimeoutId = window.setTimeout(this.authenticate.bind(this), timeout);
+  }
+
+  private handleReauthenticationSuccess(result: AuthResult) {
+    const handleSuccess = this.options.onReauthenticationSuccess || noop;
+    handleSuccess(result);
+  }
+
+  private handleReauthenticationFailure(error: Error) {
+    const handleFailure = this.options.onReauthenticationFailure || noop;
+    handleFailure(error);
   }
 
   private reauthenticate() {
     return new Promise<AuthResult>((resolve, reject) => {
-      this.client.checkSession({}, (error, result) => {
+      const opts = { responseType };
+
+      this.client.checkSession(opts, (error, result) => {
         if (error) {
           reject(error);
         }
 
-        const { userId, accessToken, expiresAt } = extractAuthData(result);
-
-        resolve({ userId, accessToken, expiresAt });
+        try {
+          const { userId, accessToken, expiresAt } = extractAuthData(result);
+          resolve({ userId, accessToken, expiresAt });
+        } catch (error) {
+          this.handleReauthenticationFailure(error)
+        }
       });
     })
   }
@@ -181,7 +231,7 @@ export function extractAuthData(parsed: AuthResponse) {
   return { userId: sub, accessToken, expiresAt };
 }
 
-export function extractExpirationData(expiresAt?: number, threshold: number = DEFAULT_THRESHOLD): [boolean, boolean?] {
+export function extractExpirationData(expiresAt?: number, leeway?: number): [boolean, boolean?] {
   if (!expiresAt) {
     return [false]
   }
@@ -192,7 +242,7 @@ export function extractExpirationData(expiresAt?: number, threshold: number = DE
     return [false]
   }
 
-  const isExpiringSoon = Number.isInteger(threshold) ? expiresWithin < threshold : true;
+  const isExpiringSoon = leeway && Number.isInteger(leeway) ? expiresWithin < leeway : true;
 
   return [true, isExpiringSoon];
 }

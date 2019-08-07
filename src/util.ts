@@ -19,3 +19,5 @@ export function randomString(length = 16) {
 
   return result;
 }
+
+export const noop = (...args: any) => {};
