@@ -10,7 +10,7 @@ A utility for Auth0 implicit authentication flows in a route-enabled single-page
 
 ### [Live Demo](https://brietsparks.github.io/auth0-js-implicit-example)
 
-### [Source](https://github.com/brietsparks/auth0-js-implicit)
+### [Source](https://github.com/brietsparks/auth0-js-implicit-example)
 
 ## Use
 
